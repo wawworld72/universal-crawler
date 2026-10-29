@@ -1,27 +1,66 @@
-
-name: Daily QT Automation
-
+name: Daily QT Automation (with History)
 on:
   schedule:
-    - cron: '0 22 * * *' # KST 07:00
+    - cron: '0 22 * * *'
   workflow_dispatch:
-
 jobs:
   daily-qt:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v4
         with:
           python-version: '3.11'
       - run: pip install youtube-transcript-api requests
-      - name: Fetch latest QT
+      - name: Fetch and Save QT to History
         run: |
-          python scripts/daily_qt.py
-      - name: Commit
+          python << 'PYEOF'
+          import os, json, requests, re
+          from datetime import datetime
+          from youtube_transcript_api import YouTubeTranscriptApi
+          def get_latest_video():
+              try:
+                  html = requests.get("https://www.youtube.com/@nalmada-gimakhin/videos", headers={'User-Agent': 'Mozilla/5.0'}).text
+                  m = re.search(r'"videoId":"([a-zA-Z0-9_-]{11})"', html)
+                  if m:
+                      return m.group(1)
+              except Exception as e:
+                  print(e)
+              return "RGYoYi56G_8"
+          video_id = get_latest_video()
+          print(f"Video ID: {video_id}")
+          try:
+              transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['ko','en'])
+              full_text = ' '.join([x['text'] for x in transcript])
+              date_str = datetime.now().strftime('%Y-%m-%d')
+              os.makedirs('qt', exist_ok=True)
+              os.makedirs('data', exist_ok=True)
+              with open(f'qt/{date_str}_{video_id}.txt', 'w', encoding='utf-8') as f:
+                  f.write(full_text)
+              result = {
+                  'date': date_str,
+                  'video_id': video_id,
+                  'url': f'https://www.youtube.com/watch?v={video_id}',
+                  'timestamp': datetime.now().isoformat(),
+                  'transcript': full_text,
+                  'length': len(full_text)
+              }
+              with open(f'data/qt_{date_str}.json', 'w', encoding='utf-8') as f:
+                  json.dump(result, f, ensure_ascii=False, indent=2)
+              with open('data/qt_latest.json', 'w', encoding='utf-8') as f:
+                  json.dump(result, f, ensure_ascii=False, indent=2)
+              print(f"Saved QT {date_str}")
+          except Exception as e:
+              print(f"Error: {e}")
+              raise
+          PYEOF
+      - name: Commit QT history
         run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
-          git add -A || true
-          git commit -m "Daily QT $(date +%Y-%m-%d)" || true
-          git push || true
+          git config --local user.email "qt@github.com"
+          git config --local user.name "QT Bot"
+          git add qt/ data/
+          git diff --staged --quiet && exit 0
+          git commit -m "Daily QT $(date '+%Y-%m-%d')"
+          git push
