@@ -1,5 +1,4 @@
-name: Playwright Advanced Crawler
-
+name: Playwright Advanced Crawler (with History)
 on:
   workflow_dispatch:
     inputs:
@@ -9,24 +8,20 @@ on:
         type: string
         default: 'https://example.com'
       actions_json:
-        description: '행동 JSON (예: [{"click": ".btn"}, {"extract": ".title"}])'
+        description: '행동 JSON: [{"click":".btn"},{"extract":"h1"}]'
         required: false
         type: string
         default: '[{"extract": "h1"}]'
-      mode:
-        description: '모드'
+      filename:
+        description: '저장 파일명 (선택)'
         required: false
-        type: choice
-        options:
-          - auto
-          - youtube
-          - login
-          - shop
-        default: 'auto'
-
+        type: string
+        default: ''
 jobs:
-  playwright-crawl:
+  playwright-crawl-and-commit:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v4
@@ -34,93 +29,92 @@ jobs:
           python-version: '3.11'
       - name: Install Playwright
         run: |
-          pip install playwright beautifulsoup4 requests youtube-transcript-api
+          pip install playwright beautifulsoup4 requests
           playwright install chromium
           playwright install-deps
-      - name: Run Playwright Crawler
+      - name: Run Playwright and Save History
         env:
           TARGET_URL: ${{ github.event.inputs.url }}
           ACTIONS_JSON: ${{ github.event.inputs.actions_json }}
+          FILENAME: ${{ github.event.inputs.filename }}
         run: |
           python << 'PYEOF'
           import os, json, asyncio
+          from datetime import datetime
+          from urllib.parse import urlparse
           from playwright.async_api import async_playwright
-
-          url = os.environ.get('TARGET_URL')
+          url = os.environ['TARGET_URL']
           actions_str = os.environ.get('ACTIONS_JSON', '[{"extract": "h1"}]')
-          
+          filename_input = os.environ.get('FILENAME', '').strip()
           try:
               actions = json.loads(actions_str)
           except:
               actions = [{"extract": actions_str}]
-
+          print(f"Playwright crawling: {url}")
           async def run():
               async with async_playwright() as p:
                   browser = await p.chromium.launch(headless=True)
                   page = await browser.new_page(user_agent='Mozilla/5.0')
                   await page.goto(url, wait_until='networkidle', timeout=60000)
-                  
                   results = []
                   for action in actions:
-                      if 'click' in action:
-                          print(f"Clicking: {action['click']}")
-                          await page.click(action['click'], timeout=10000)
-                          await page.wait_for_timeout(1000)
-                      elif 'fill' in action:
-                          selector, value = action['fill']
-                          print(f"Filling: {selector}")
-                          await page.fill(selector, value)
-                      elif 'wait' in action:
-                          await page.wait_for_selector(action['wait'], timeout=10000)
-                      elif 'extract' in action:
-                          selector = action['extract']
-                          els = await page.locator(selector).all_text_contents()
-                          results.append({'selector': selector, 'data': els})
-                          print(f"Extracted {len(els)} from {selector}")
-                      elif 'scroll' in action:
-                          await page.mouse.wheel(0, action['scroll'])
-                          await page.wait_for_timeout(1000)
-                  
-                  # Save results
-                  with open('playwright_result.json', 'w', encoding='utf-8') as f:
-                      json.dump({'url': url, 'actions': actions, 'results': results}, f, ensure_ascii=False, indent=2)
-                  
+                      try:
+                          if 'click' in action:
+                              await page.click(action['click'], timeout=10000)
+                              await page.wait_for_timeout(1500)
+                          elif 'fill' in action:
+                              sel, val = action['fill']
+                              await page.fill(sel, val)
+                          elif 'wait' in action:
+                              await page.wait_for_selector(action['wait'], timeout=10000)
+                          elif 'extract' in action:
+                              sel = action['extract']
+                              els = await page.locator(sel).all_text_contents()
+                              results.append({'selector': sel, 'count': len(els), 'data': els[:50]})
+                          elif 'scroll' in action:
+                              await page.mouse.wheel(0, action['scroll'])
+                              await page.wait_for_timeout(1000)
+                      except Exception as e:
+                          results.append({'error': str(e), 'action': action})
+                  if filename_input:
+                      filename = filename_input
+                  else:
+                      domain = urlparse(url).netloc.replace('.', '_')
+                      ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+                      filename = f"playwright_{domain}_{ts}.json"
+                  if not filename.endswith('.json'):
+                      filename = filename + '.json'
+                  os.makedirs('data', exist_ok=True)
+                  final_result = {
+                      'url': url,
+                      'actions': actions,
+                      'timestamp': datetime.now().isoformat(),
+                      'results': results
+                  }
+                  with open(f'data/{filename}', 'w', encoding='utf-8') as f:
+                      json.dump(final_result, f, ensure_ascii=False, indent=2)
+                  with open('data/playwright_latest.json', 'w', encoding='utf-8') as f:
+                      json.dump(final_result, f, ensure_ascii=False, indent=2)
+                  index_path = 'data/index.md'
+                  if not os.path.exists(index_path):
+                      with open(index_path, 'w', encoding='utf-8') as f:
+                          f.write("# Crawl History\n\n| Time | URL | Mode | File |\n|------|-----|------|------|\n")
+                  line = f"| {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | {url} | playwright | [{filename}]({filename}) |"
+                  with open(index_path, 'r', encoding='utf-8') as f:
+                      content = f.read()
+                  with open(index_path, 'w', encoding='utf-8') as f:
+                      lines = content.split('\n')
+                      lines.insert(3, line)
+                      f.write('\n'.join(lines))
+                  print(f"Saved data/{filename}")
                   await browser.close()
-
           asyncio.run(run())
           PYEOF
-      - uses: actions/upload-artifact@v4
-        with:
-          name: playwright-results
-          path: playwright_result.json
-
-  youtube-qt-auto:
-    runs-on: ubuntu-latest
-    if: ${{ github.event.inputs.mode == 'youtube' || github.event_name == 'schedule' }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
-      - run: pip install youtube-transcript-api requests beautifulsoup4
-      - run: |
-          python << 'PYEOF'
-          import requests, re
-          from youtube_transcript_api import YouTubeTranscriptApi
-          # Get latest video from channel
-          channel_url = "https://www.youtube.com/@nalmada-gimakhin"
-          # For demo, use latest known video
-          video_id = "RGYoYi56G_8"
-          try:
-              transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['ko','en'])
-              text = ' '.join([t['text'] for t in transcript])
-              with open('latest_qt_transcript.txt','w',encoding='utf-8') as f:
-                  f.write(text)
-              print(f"Transcript length: {len(text)}")
-          except Exception as e:
-              print(f"Error: {e}")
-          PYEOF
-      - uses: actions/upload-artifact@v4
-        with:
-          name: youtube-transcript
-          path: latest_qt_transcript.txt
+      - name: Commit to GitHub history
+        run: |
+          git config --local user.email "playwright@github.com"
+          git config --local user.name "Playwright Bot"
+          git add data/
+          git diff --staged --quiet && echo "No changes" && exit 0
+          git commit -m "Playwright: ${{ github.event.inputs.url }} - $(date '+%Y-%m-%d %H:%M:%S')"
+          git push
