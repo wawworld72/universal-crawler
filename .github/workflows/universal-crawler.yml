@@ -1,14 +1,4 @@
-"""
-범용 크롤링 프록시 - GitHub Actions 버전
-코드 수정 없이 URL 파라미터만으로 어떤 사이트든 크롤링
-사용법: GitHub Actions에서 workflow_dispatch로 URL 입력
-또는 직접 Python 스크립트로 호출
-
-설치: GitHub 리포지토리에 이 파일을 .github/workflows/universal-crawler.yml로 저장
-"""
-
-name: Universal Web Crawler
-
+name: Universal Web Crawler (with History)
 on:
   workflow_dispatch:
     inputs:
@@ -18,216 +8,93 @@ on:
         type: string
         default: 'https://example.com'
       selector:
-        description: 'CSS 선택자 (선택, 예: h1, .title, #content)'
+        description: 'CSS 선택자 (선택)'
         required: false
         type: string
         default: ''
-      mode:
-        description: '모드 선택'
+      filename:
+        description: '저장할 파일명 (선택, 비우면 자동생성)'
         required: false
-        type: choice
-        options:
-          - auto
-          - youtube_transcript
-          - web_crawl
-          - json_api
-        default: 'auto'
-      output_format:
-        description: '출력 형식'
-        required: false
-        type: choice
-        options:
-          - json
-          - markdown
-          - text
-        default: 'json'
-
-  schedule:
-    # 매일 오전 7시 자동 실행 (날마다 기막힌 새벽용)
-    - cron: '0 22 * * *'  # UTC 22:00 = KST 07:00
-
+        type: string
+        default: ''
 jobs:
-  crawl:
+  crawl-and-commit:
     runs-on: ubuntu-latest
-    
+    permissions:
+      contents: write
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v4
         with:
           python-version: '3.11'
-
       - name: Install dependencies
-        run: |
-          pip install requests beautifulsoup4 youtube-transcript-api lxml
-
-      - name: Universal Crawl
+        run: pip install requests beautifulsoup4 lxml
+      - name: Crawl and Save to GitHub History
         env:
-          TARGET_URL: ${{ github.event.inputs.url || 'https://www.youtube.com/watch?v=RGYoYi56G_8' }}
-          SELECTOR: ${{ github.event.inputs.selector || '' }}
-          MODE: ${{ github.event.inputs.mode || 'auto' }}
-          OUTPUT_FORMAT: ${{ github.event.inputs.output_format || 'json' }}
+          TARGET_URL: ${{ github.event.inputs.url }}
+          SELECTOR: ${{ github.event.inputs.selector }}
+          FILENAME: ${{ github.event.inputs.filename }}
         run: |
           python << 'PYEOF'
-          import os
-          import re
-          import json
-          import requests
+          import os, re, json, requests
           from bs4 import BeautifulSoup
-          
-          url = os.environ.get('TARGET_URL', '')
-          selector = os.environ.get('SELECTOR', '')
-          mode = os.environ.get('MODE', 'auto')
-          output_format = os.environ.get('OUTPUT_FORMAT', 'json')
-          
-          print(f"🎯 Target URL: {url}")
-          print(f"🔍 Selector: {selector}")
-          print(f"📋 Mode: {mode}")
-          
-          def extract_youtube_id(url):
-              patterns = [
-                  r'(?:youtube\.com/watch\?v=|youtu\.be/|youtube\.com/embed/)([^&\?\/]+)',
-                  r'^([a-zA-Z0-9_-]{11})$'
-              ]
-              for pattern in patterns:
-                  match = re.search(pattern, url)
-                  if match:
-                      return match.group(1)
-              return url
-          
-          def get_youtube_transcript(video_id):
-              try:
-                  from youtube_transcript_api import YouTubeTranscriptApi
-                  transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=['ko', 'en'])
-                  full_text = ' '.join([item['text'] for item in transcript_list])
-                  return {
-                      'success': True,
-                      'mode': 'youtube_transcript',
-                      'video_id': video_id,
-                      'transcript': full_text,
-                      'segments': transcript_list,
-                      'length': len(full_text)
-                  }
-              except Exception as e:
-                  return {'success': False, 'error': str(e), 'video_id': video_id}
-          
-          def crawl_website(url, selector=''):
-              try:
-                  headers = {
-                      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-                  }
-                  response = requests.get(url, headers=headers, timeout=30)
-                  response.raise_for_status()
-                  
-                  content_type = response.headers.get('Content-Type', '')
-                  
-                  # JSON API인 경우
-                  if 'application/json' in content_type or url.endswith('.json'):
-                      try:
-                          data = response.json()
-                          return {
-                              'success': True,
-                              'mode': 'json_api',
-                              'url': url,
-                              'data': data
-                          }
-                      except:
-                          pass
-                  
-                  # HTML 파싱
-                  soup = BeautifulSoup(response.text, 'lxml')
-                  
-                  if not selector:
-                      # selector 없으면 전체 텍스트
-                      text = soup.get_text(separator=' ', strip=True)
-                      return {
-                          'success': True,
-                          'mode': 'web_crawl',
-                          'url': url,
-                          'title': soup.title.string if soup.title else '',
-                          'text': text[:10000],  # 최대 10k자
-                          'html_length': len(response.text)
-                      }
-                  else:
-                      # selector로 추출
-                      elements = soup.select(selector)
-                      results = []
-                      for el in elements[:20]:  # 최대 20개
-                          results.append({
-                              'text': el.get_text(strip=True),
-                              'html': str(el)[:1000],
-                              'href': el.get('href') if el.get('href') else None
-                          })
-                      
-                      return {
-                          'success': True,
-                          'mode': 'web_crawl',
-                          'url': url,
-                          'selector': selector,
-                          'count': len(results),
-                          'results': results
-                      }
-                      
-              except Exception as e:
-                  return {'success': False, 'error': str(e), 'url': url}
-          
-          # 모드 자동 감지
-          if mode == 'auto':
-              if 'youtube.com' in url or 'youtu.be' in url or len(url) == 11:
-                  mode = 'youtube_transcript'
-              elif url.endswith('.json') or '/api/' in url:
-                  mode = 'json_api'
-              else:
-                  mode = 'web_crawl'
-          
-          # 실행
-          if mode == 'youtube_transcript':
-              video_id = extract_youtube_id(url)
-              result = get_youtube_transcript(video_id)
+          from datetime import datetime
+          from urllib.parse import urlparse
+          url = os.environ['TARGET_URL']
+          selector = os.environ.get('SELECTOR', '').strip()
+          filename_input = os.environ.get('FILENAME', '').strip()
+          print(f"Crawling: {url}")
+          headers = {'User-Agent': 'Mozilla/5.0'}
+          resp = requests.get(url, headers=headers, timeout=30)
+          resp.raise_for_status()
+          soup = BeautifulSoup(resp.text, 'lxml')
+          if selector:
+              elements = soup.select(selector)
+              data = [{'text': el.get_text(strip=True), 'html': str(el)[:2000]} for el in elements[:50]]
           else:
-              result = crawl_website(url, selector)
-          
-          # 출력
-          print("\n" + "="*50)
-          print(json.dumps(result, ensure_ascii=False, indent=2)[:5000])
-          print("="*50 + "\n")
-          
-          # 파일로 저장
-          with open('crawl_result.json', 'w', encoding='utf-8') as f:
+              data = {'title': soup.title.string if soup.title else '', 'text': soup.get_text(' ', strip=True)[:15000]}
+          if filename_input:
+              filename = filename_input
+          else:
+              domain = urlparse(url).netloc.replace('.', '_')
+              timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+              filename = f"{domain}_{timestamp}"
+          if not filename.endswith('.json') and not filename.endswith('.md'):
+              filename = filename + '.json'
+          result = {
+              'url': url,
+              'selector': selector,
+              'timestamp': datetime.now().isoformat(),
+              'domain': urlparse(url).netloc,
+              'data': data,
+              'html_length': len(resp.text)
+          }
+          os.makedirs('data', exist_ok=True)
+          with open(f'data/{filename}', 'w', encoding='utf-8') as f:
               json.dump(result, f, ensure_ascii=False, indent=2)
-          
-          # 마크다운으로도 저장
-          if result.get('success'):
-              with open('crawl_result.md', 'w', encoding='utf-8') as f:
-                  f.write(f"# Crawl Result\n\n")
-                  f.write(f"- URL: {result.get('url') or result.get('video_id')}\n")
-                  f.write(f"- Mode: {result.get('mode')}\n")
-                  f.write(f"- Time: {__import__('datetime').datetime.now()}\n\n")
-                  if 'transcript' in result:
-                      f.write(f"## Transcript\n\n{result['transcript']}\n")
-                  elif 'text' in result:
-                      f.write(f"## Text\n\n{result['text'][:5000]}\n")
-                  elif 'results' in result:
-                      f.write(f"## Results ({result['count']} items)\n\n")
-                      for r in result['results']:
-                          f.write(f"- {r['text']}\n")
-          
+          with open('data/latest.json', 'w', encoding='utf-8') as f:
+              json.dump(result, f, ensure_ascii=False, indent=2)
+          md_filename = filename.replace('.json', '.md')
+          with open(f'data/{md_filename}', 'w', encoding='utf-8') as f:
+              f.write(f"# Crawl Result\n\n- **URL:** {url}\n- **Time:** {result['timestamp']}\n- **Selector:** {selector or 'full page'}\n\n## Data\n\n```json\n{json.dumps(data, ensure_ascii=False, indent=2)[:8000]}\n```\n")
+          index_path = 'data/index.md'
+          history_line = f"| {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | {url} | {selector or 'full'} | [{filename}]({filename}) |"
+          if not os.path.exists(index_path):
+              with open(index_path, 'w', encoding='utf-8') as f:
+                  f.write("# Crawl History\n\n| Time | URL | Selector | File |\n|------|-----|----------|------|\n")
+          with open(index_path, 'r', encoding='utf-8') as f:
+              content = f.read()
+          with open(index_path, 'w', encoding='utf-8') as f:
+              lines = content.split('\n')
+              lines.insert(3, history_line)
+              f.write('\n'.join(lines))
+          print(f"Saved to data/{filename}")
           PYEOF
-
-      - name: Upload results
-        uses: actions/upload-artifact@v4
-        with:
-          name: crawl-results
-          path: |
-            crawl_result.json
-            crawl_result.md
-
-      - name: Commit results (optional)
+      - name: Commit results to GitHub history
         run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
-          git add crawl_result.* || true
-          git commit -m "Crawl: ${{ github.event.inputs.url || 'auto' }} - $(date)" || true
-          git push || true
+          git config --local user.email "crawler@github.com"
+          git config --local user.name "Universal Crawler Bot"
+          git add data/
+          git diff --staged --quiet && echo "No changes to commit" && exit 0
+          git commit -m "Crawl: ${{ github.event.inputs.url }} - $(date '+%Y-%m-%d %H:%M:%S')"
+          git push
